@@ -1,5 +1,5 @@
 # Sigma2SplunkAlert
-Converts Sigma detection rules to a Splunk alert configuration.
+Converts Sigma detection rules to a Splunk alert configuration.  Now updated to use REST API and support Splunk 8.0 alerts.
 
 # Motivation
 Many Security Operations Center (SOC) are using scheduled searches for their detection rules. Sigma is the new standard for describing detection rules. Deploying multiple Sigma detection rules into Splunk was a time-consuming task. Sigma2SplunkAlert converts multiple Sigma detection rules into a Splunk savedsearches.conf configuration. Additionally, Sigma2SplunkAlerts supports Splunk alert actions such as Send Email and Summary Index. Sigma2SplunkAlert introduces tokens to use the interesting fields of an alert in the email body. Furthermore, Splunk Search transformations are used to adapt the Splunk Search with customizations such as adding an whitelist or another custom Splunk command.
@@ -88,6 +88,13 @@ Translates a folder of sigma detection rules to a savedsearches.conf:
 ./sigma2splunkalert ../sigma/rules/windows/sysmon/
 ````
 
+Translates a folder of sigma detection rules to a savedsearches.conf and upload via REST:
+(first adjust the username pass in the file
+````
+./sigma2splunkalertrest ../sigma/rules/windows/sysmon/
+````
+
+
 Translate a folder of Sigma detection rules with a custom Sigma and Sigma2SplunkAlert configuration:
 ````
 ./sigma2splunkalert -c config/config.yml -sc sigma_config/splunk-all.yml ../forks/sigma/rules/windows/sysmon/
@@ -97,4 +104,5 @@ Translate a folder of Sigma detection rules with a custom Sigma and Sigma2Splunk
 * Improved error handling
 
 # Credits
-This is a private repository developed by Patrick Bareiss (Twitter: [@bareiss_patrick](https://twitter.com/bareiss_patrick)).
+This is a Fork of a private repository developed by Patrick Bareiss (Twitter: [@bareiss_patrick](https://twitter.com/bareiss_patrick)).
+Currently being updated to use rest with the sigma2splunkalertRest command
