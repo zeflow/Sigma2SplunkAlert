@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+
+# A Sigma to Splunk Alter Converter
+# Copyright 2019 Patrick Bareiss (@patrick_bareiss)
+# updated to REST API in 2021 by Floris Ladan
+
+import sys
+import argparse
+import os
+import yaml
+import subprocess
+from subprocess import DEVNULL
+from jinja2 import Environment, FileSystemLoader
+from classes.UseCase import UseCase
+from classes.DetectionRuleConverter import DetectionRuleConverter
+import urllib
+import httplib2
+import requests
+from xml.dom import minidom
+import warnings
+warnings.filterwarnings("ignore")
+
+url = 'https://:8089' ## rest  url here
+user = '' ##username here
+passwd = '' #password here
+destinationApp='search' #location of the dest app here
+
+
+def main(argv):
+    # parse input variables
+    parser = argparse.ArgumentParser(
+        description='Convert Sigma rules to Splunk Alerts savedsearches.conf configuration.')
+    parser.add_argument('rules', action='store', metavar='N', nargs='+',
+                        help='folder or file containing the Sigma rules')
+    parser.add_argument('--config', '-c', action='store', dest='config',
+                        help='Sigma2SplunkAlert configuration file')
+    parser.add_argument('--sigma-config', '-sc', action='store', dest='sigma_config',
+                        help='Sigma configuration with field name and index name mapping')
+    parser.add_argument('--template', '-t', action='store', dest='template',
+                        help='file containing the savedsearches.conf template')
+
+    cmdargs = parser.parse_args()
+
+    # cmdargs Sigma2SplunkAlert configuration
+    if cmdargs.config:
+        converter_config_path = cmdargs.config
+    else:
+        converter_config_path = 'config/config.yml'
+
+    # cmdargs Sigma Configuration
+    if cmdargs.sigma_config:
+        sigma_config_path = cmdargs.sigma_config
+    else:
+        sigma_config_path = 'sigma_config/splunk-all.yml'
+        
+    # cmdargs template Configuration
+    if cmdargs.template:
+        template_path = cmdargs.template
+
+    #login to splunk
+    sessionKey=login2splunk(url,user,passwd)
+    #print(sessionKey)
+    # Splunk Search Converter
+
+    # variables
+    input_path_list = cmdargs.rules
+    detection_rules = []
+
+    # Load Sigma2SplunkAlert Configuration
+    sigma2splunkalertconfig = openSigma2SplunkConfiguration(converter_config_path)
+
+    # Iterate through N input folders
+    for input_path in input_path_list:
+        files = loadSigmaRules(input_path)
+        for file in files:
+            # Load Sigma Rule
+            sigma_rule = openSigmaDetectionRule(file)
+
+            # Convert Sigma Rule to Splunk Search
+            splunk_search = DetectionRuleConverter.convertSigmaRule(sigma_config_path, file)
+            if splunk_search == "Converter Failure":
+                continue
+
+            # Perform Splunk Search transformations
+            if "search_transformations" in sigma2splunkalertconfig:
+                splunk_search = DetectionRuleConverter.performSearchTransformation(
+                    sigma2splunkalertconfig["search_transformations"], splunk_search, sigma_rule)
+
+            # Alert with Summary index
+            splunk_search = DetectionRuleConverter.addToSummaryIndex(
+                splunk_search, sigma2splunkalertconfig, sigma_rule)
+
+            # Create Detection Rule
+            detection_rule = UseCase(sigma_rule, sigma2splunkalertconfig, splunk_search)
+            detection_rules.append(detection_rule)
+
+    
+    # Use Jinja2 Templating for create configuration
+    if cmdargs.template:
+        file_loader = FileSystemLoader(os.path.dirname(template_path))
+    else:
+        file_loader = FileSystemLoader('templates')
+        
+    env = Environment(loader=file_loader)
+    env.trim_blocks = True
+    env.lstrip_blocks = True
+    env.rstrip_blocks = True
+    
+    if cmdargs.template:
+        template = env.get_template(os.path.basename(template_path))
+
+    else:
+        template = env.get_template('template')
+
+    output = template.render(uc_list=detection_rules)
+    #print(output)    
+    for detection_rule in detection_rules:
+        # Remove leading and trailing whitespace from the search
+        searchQuery = detection_rule.splunk_search
+        searchQuery = searchQuery.strip()
+        # If the query doesn't already start with the 'search' operator or another 
+        # generating command (e.g. "| inputcsv"), then prepend "search " to it.
+        #if not (searchQuery.startswith('search') or searchQuery.startswith("|")):
+        #    searchQuery = 'search ' + searchQuery
+
+        data = {
+        'name': detection_rule.title,
+        'action.email': detection_rule.action_email,
+        'action.email.subject.alert': detection_rule.email.subject,
+        'action.email.to':detection_rule.email.to,
+        'action.email.message.alert':detection_rule.email.message,
+        'action.email.useNSSubject': '1',
+        'search': searchQuery,
+        'alert.severity': "1",
+        'alert.suppress': "0",
+        'alert.track': "1",
+        'alert.expires': "24h",
+        'alert_type': 'number of events',
+        'cron_schedule':detection_rule.cron_schedule,
+        'allow_skew':detection_rule.allow_skew,
+        'schedule_window':detection_rule.schedule_window,
+        'description':detection_rule.description,
+        'dispatch.earliest_time':detection_rule.earliest_time,
+        'dispatch.latest_time':detection_rule.latest_time,
+        'is_scheduled':'1',
+        'alert_comparator':'greater than',
+        'alert_threshold':'0',
+        'request.ui_dispatch_app':destinationApp,
+        'request.ui_dispatch_view':destinationApp  
+        }
+        uploadRule(url,destinationApp,sessionKey,data)
+
+def login2splunk(baseurl,userName,password):
+#authenticate yourself
+    try:
+        serverContent = httplib2.Http(disable_ssl_certificate_validation=True).request(baseurl + '/services/auth/login','POST', headers={}, body=urllib.parse.urlencode({'username':userName, 'password':password}))[1]
+        print("successfull login to: "+baseurl)
+    except:
+        print("error in retrieving login.")
+    try:
+        sessionKey = minidom.parseString(serverContent).getElementsByTagName('sessionKey')[0].childNodes[0].nodeValue
+        return(sessionKey)
+    except:
+        print("error in retrieving sessionKey")
+        print(minidom.parseString(serverContent).toprettyxml(encoding='UTF-8'))
+
+def uploadRule(baseurl,app,sessionKey,data):
+    name=data["name"]
+    header = {'Authorization': 'Splunk %s' % sessionKey}
+    Results = requests.post(baseurl + '/servicesNS/nobody/'+app+'/saved/searches', headers=header,verify=False,data=data)
+
+    if Results.status_code != 200:
+        print("rule:"+ name+" exists; updating")
+        updateData=data
+        updateData.pop('name')
+        Results = requests.post(baseurl + '/servicesNS/nobody/'+app+'/saved/searches/'+name, headers=header,verify=False,data=data)
+
+    if Results.status_code == 200:
+        print("successfully updated/created rule: "+name)
+        #print(Results.status_code)
+        #print(Results.text)
+
+
+def props(cls):
+    return [i for i in cls.__dict__.keys() if i[:1] != '_']
+
+
+
+def openSigma2SplunkConfiguration(converter_config_path):
+    # Load Sigma2SplunkAlert configuration
+    with open(converter_config_path, 'r') as stream:
+        try:
+            converter_config = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            print(exc)
+            print("Failure to read the Sigma2SplunkAlert configuration")
+            sys.exit(1)
+    return converter_config
+
+
+def openSigmaDetectionRule(rule_path):
+    # Load Sigma detection rule
+    with open(rule_path, 'r') as stream:
+        try:
+            sigma_uc = list(yaml.safe_load_all(stream))[0]
+        except yaml.YAMLError as exc:
+            print(exc)
+            sys.exit(1)
+    return sigma_uc
+
+
+def loadSigmaRules(path):
+    files = []
+    if os.path.isfile(path):
+        files.append(path)
+    else:
+        # r=root, d=directories, f = files
+        for r, d, f in os.walk(path):
+            for file in f:
+                if '.yml' in file:
+                    files.append(os.path.join(r, file))
+    return files
+
+
+if __name__ == "__main__":
+    main(sys.argv)
